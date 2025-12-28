@@ -1,2 +1,2 @@
-python-telegram-bot==20.7
-websocket-client
+python-telegram-bot[job-queue]>=20.7
+websocket-client>=1.6.0

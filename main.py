@@ -95,20 +95,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🤖 *Polymarket Copy Trading Bot*
 
 *Commands:*
-/add <wallet> [name] - Add wallet to track with optional name
+/add [name] <wallet> - Add wallet to track with optional name
 /remove <wallet> - Remove wallet
 /list - Show tracked wallets
 /status - Show monitoring status
 /help - Show this message
 
 *Examples:*
-`/add 0xaED1f1F120C1aB95958719BEb984D5b2013cF0cD ProTrader`
+`/add luk 0xaED1f1F120C1aB95958719BEb984D5b2013cF0cD`
 `/add 0xaED1f1F120C1aB95958719BEb984D5b2013cF0cD`
 """
     await update.message.reply_text(welcome_message, parse_mode='Markdown')
 
-async def add_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Add a wallet to track"""
+"""Add a wallet to track"""
     print(f"📨 Received /add from user {update.effective_user.id}")
     
     if not context.args:
@@ -208,18 +207,18 @@ async def list_wallets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     
     if not config["wallets"]:
-        await update.message.reply_text("🔭 No wallets being tracked\n\nUse /add <wallet> [name] to start tracking")
+        await update.message.reply_text("🔭 No wallets being tracked\n\nUse /add [name] <wallet> to start tracking")
         return
     
     message = "📋 *Tracked Wallets:*\n\n"
     for i, wallet in enumerate(config["wallets"], 1):
         wallet_name = config.get("wallet_names", {}).get(wallet, None)
         if wallet_name:
-            message += f"{i}. *{wallet_name}* 🟢\n   `{wallet[:10]}...{wallet[-8:]}`\n"
+            message += f"{i}. *{wallet_name}* 🟢\n   `{wallet}`\n\n"
         else:
-            message += f"{i}. `{wallet[:10]}...{wallet[-8:]}` 🟢\n"
+            message += f"{i}. `{wallet}` 🟢\n\n"
     
-    message += f"\n✅ All {len(config['wallets'])} wallet(s) are being monitored!"
+    message += f"✅ All {len(config['wallets'])} wallet(s) are being monitored!"
     
     await update.message.reply_text(message, parse_mode='Markdown')
 

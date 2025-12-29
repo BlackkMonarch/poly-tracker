@@ -6,11 +6,12 @@ from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, ContextTypes
 from polymarket_tracker import PolymarketMonitor
 
-# YOUR TELEGRAM BOT TOKEN - Replace this with your actual token from BotFather
+# YOUR TELEGRAM BOT TOKEN
 TELEGRAM_BOT_TOKEN = "8268755391:AAETur8_5id_EX8XMqdv9UnxC7tQutRMKqg"
 
-# File to store tracked wallets
-CONFIG_FILE = "config.json"
+# Use Railway's persistent storage path
+CONFIG_DIR = "/data"  # Your volume mount path
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 # Global monitors dictionary {wallet: monitor_instance}
 monitors = {}
@@ -18,27 +19,77 @@ monitors = {}
 # Queue for messages from WebSocket threads
 message_queue = queue.Queue()
 
+def ensure_config_dir():
+    """Ensure the config directory exists"""
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        print(f"✅ Config directory ensured: {CONFIG_DIR}")
+    except Exception as e:
+        print(f"⚠️  Could not create config dir: {e}")
+        # Fallback to current directory
+        global CONFIG_FILE
+        CONFIG_FILE = "config.json"
+        print(f"⚠️  Falling back to: {CONFIG_FILE}")
+
 def load_config():
     """Load tracked wallets from config file"""
+    ensure_config_dir()
+    
+    # Check if we have old config in current directory but not in /data
+    local_config = "config.json"
+    if os.path.exists(local_config) and not os.path.exists(CONFIG_FILE):
+        print("📦 Migrating config from local to persistent storage...")
+        try:
+            import shutil
+            shutil.copy2(local_config, CONFIG_FILE)
+            print(f"✅ Config migrated to {CONFIG_FILE}")
+        except Exception as e:
+            print(f"⚠️  Could not migrate config: {e}")
+    
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, 'r') as f:
                 config = json.load(f)
-                # Ensure chat_ids field exists
+                print(f"📁 Config loaded from {CONFIG_FILE}")
+                
+                # Ensure all fields exist
+                if "wallets" not in config:
+                    config["wallets"] = []
                 if "chat_ids" not in config:
                     config["chat_ids"] = []
-                # Ensure wallet_names field exists
                 if "wallet_names" not in config:
                     config["wallet_names"] = {}
+                    
                 return config
-        except:
+        except Exception as e:
+            print(f"❌ Error loading config: {e}")
             return {"wallets": [], "chat_ids": [], "wallet_names": {}}
+    
+    print(f"📝 Creating new config at {CONFIG_FILE}")
     return {"wallets": [], "chat_ids": [], "wallet_names": {}}
 
 def save_config(config):
     """Save tracked wallets and chat IDs to config file"""
-    with open(CONFIG_FILE, 'w') as f:
-        json.dump(config, f, indent=2)
+    ensure_config_dir()
+    
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=2)
+        print(f"💾 Config saved to {CONFIG_FILE}")
+        return True
+    except Exception as e:
+        print(f"❌ Error saving config: {e}")
+        
+        # Try to save locally as backup
+        try:
+            local_file = "config.json"
+            with open(local_file, 'w') as f:
+                json.dump(config, f, indent=2)
+            print(f"💾 Config saved locally as backup to {local_file}")
+            return True
+        except Exception as e2:
+            print(f"❌ Failed to save backup: {e2}")
+            return False
 
 def format_trade_message(trade):
     """Format trade data for Telegram"""
@@ -91,7 +142,10 @@ def format_trade_message(trade):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command - show welcome message"""
-    welcome_message = """
+    # Show storage info
+    config_info = f"\n💾 *Storage:* Using persistent storage at `/data`"
+    
+    welcome_message = f"""
 🤖 *Polymarket Copy Trading Bot*
 
 *Commands:*
@@ -104,6 +158,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 *Examples:*
 `/add luk 0xaED1f1F120C1aB95958719BEb984D5b2013cF0cD`
 `/add 0xaED1f1F120C1aB95958719BEb984D5b2013cF0cD`
+{config_info}
 """
     await update.message.reply_text(welcome_message, parse_mode='Markdown')
 
@@ -133,6 +188,7 @@ async def add_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if "chat_ids" not in config:
             config["chat_ids"] = []
         config["chat_ids"].append(chat_id)
+        print(f"✅ Added chat ID {chat_id} to config")
     
     # Check if already tracking
     if wallet in config["wallets"]:
@@ -151,7 +207,12 @@ async def add_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if "wallet_names" not in config:
             config["wallet_names"] = {}
         config["wallet_names"][wallet] = wallet_name
-    save_config(config)
+    
+    # Save config to persistent storage
+    if save_config(config):
+        await update.message.reply_text(f"💾 Config saved to persistent storage")
+    else:
+        await update.message.reply_text(f"⚠️ Config saved locally (persistent storage failed)")
     
     # Start monitoring this wallet
     def on_trade(trade):
@@ -194,6 +255,8 @@ async def remove_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Remove wallet name if exists
     if wallet in config.get("wallet_names", {}):
         del config["wallet_names"][wallet]
+    
+    # Save updated config
     save_config(config)
     
     # Stop monitoring
@@ -230,13 +293,17 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total = len(config["wallets"])
     active = len(monitors)
     
+    # Check storage info
+    storage_status = "✅ Using persistent storage" if os.path.exists("/data") else "⚠️ Using local storage"
+    
     message = f"""
 📊 *Monitoring Status*
 
 👥 Tracked wallets: {total}
 🟢 Active monitors: {active}
+💾 Storage: {storage_status}
 
-💡 All tracked wallets auto-restart when bot restarts!
+💡 Wallets persist across bot restarts!
 """
     
     await update.message.reply_text(message, parse_mode='Markdown')
@@ -273,8 +340,13 @@ async def setup_bot_commands(app: Application):
 def main():
     """Start the bot"""
     print("=" * 60)
-    print("POLYMARKET TELEGRAM BOT")
+    print("POLYMARKET TELEGRAM BOT - RAILWAY EDITION")
     print("=" * 60)
+    
+    # Check storage
+    print(f"📂 Config path: {CONFIG_FILE}")
+    print(f"📦 Persistent storage mounted: {os.path.exists('/data')}")
+    print(f"📄 Config exists: {os.path.exists(CONFIG_FILE)}")
     
     if TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         print("❌ Error: Please set your Telegram Bot Token!")
@@ -324,6 +396,8 @@ def main():
             monitor.start()
             monitors[wallet] = monitor
             print(f"  ✅ Monitoring: {wallet[:10]}...")
+    else:
+        print("ℹ️  No wallets or chat IDs to restore")
     
     # Start message queue processor as a background job
     app.job_queue.run_repeating(process_message_queue, interval=0.5, first=0)
@@ -331,7 +405,7 @@ def main():
     
     print("✅ Bot started! Waiting for messages...")
     print("💡 Send /start to the bot on Telegram to begin")
-    print("🔍 Watching for incoming commands...")
+    print("=" * 60)
     
     # Start the bot
     app.run_polling(allowed_updates=Update.ALL_TYPES)

@@ -2,7 +2,7 @@ import json
 import os
 import asyncio
 import queue
-from telegram import Update
+from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, ContextTypes
 from polymarket_tracker import PolymarketMonitor
 
@@ -27,10 +27,13 @@ def load_config():
                 # Ensure chat_ids field exists
                 if "chat_ids" not in config:
                     config["chat_ids"] = []
+                # Ensure wallet_names field exists
+                if "wallet_names" not in config:
+                    config["wallet_names"] = {}
                 return config
         except:
-            return {"wallets": [], "chat_ids": []}
-    return {"wallets": [], "chat_ids": []}
+            return {"wallets": [], "chat_ids": [], "wallet_names": {}}
+    return {"wallets": [], "chat_ids": [], "wallet_names": {}}
 
 def save_config(config):
     """Save tracked wallets and chat IDs to config file"""
@@ -51,6 +54,11 @@ def format_trade_message(trade):
     outcome = trade.get("outcome", "Unknown")
     tx_hash = trade.get("transactionHash", "Unknown")
     wallet = trade.get("proxyWallet", "Unknown")
+    
+    # Get wallet name if set
+    config = load_config()
+    wallet_name = config.get("wallet_names", {}).get(wallet.lower(), None)
+    wallet_display = f"*{wallet_name}*" if wallet_name else f"`{wallet[:10]}...{wallet[-8:]}`"
     
     # Get eventSlug for correct URL (not market slug!)
     event_slug = trade.get("eventSlug", "")
@@ -74,7 +82,7 @@ def format_trade_message(trade):
 💵 *Price:* ${price:.4f}
 💸 *Total:* ${total_value:.2f}
 
-👤 *Wallet:* `{wallet[:10]}...{wallet[-8:]}`
+👤 *Wallet:* {wallet_display}
 🔗 [View Transaction](https://polygonscan.com/tx/{tx_hash})
 
 💡 *To copy:* Click market link above → {side} "{outcome}"
@@ -87,13 +95,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🤖 *Polymarket Copy Trading Bot*
 
 *Commands:*
-/add <wallet> - Add wallet to track
+/add <wallet> [name] - Add wallet to track with optional name
 /remove <wallet> - Remove wallet
 /list - Show tracked wallets
 /status - Show monitoring status
 /help - Show this message
 
-*Example:*
+*Examples:*
+`/add 0xaED1f1F120C1aB95958719BEb984D5b2013cF0cD ProTrader`
 `/add 0xaED1f1F120C1aB95958719BEb984D5b2013cF0cD`
 """
     await update.message.reply_text(welcome_message, parse_mode='Markdown')
@@ -103,12 +112,17 @@ async def add_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"📨 Received /add from user {update.effective_user.id}")
     
     if not context.args:
-        await update.message.reply_text("❌ Please provide a wallet address\nExample: /add 0x...")
+        await update.message.reply_text("❌ Please provide a wallet address\nExample: /add 0x... [optional name]")
         return
     
     wallet = context.args[0].strip().lower()
     if not wallet.startswith("0x"):
         wallet = "0x" + wallet
+    
+    # Get optional name (all args after wallet address)
+    wallet_name = None
+    if len(context.args) > 1:
+        wallet_name = " ".join(context.args[1:]).strip()
     
     # Load config
     config = load_config()
@@ -119,15 +133,24 @@ async def add_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if "chat_ids" not in config:
             config["chat_ids"] = []
         config["chat_ids"].append(chat_id)
-        save_config(config)
     
     # Check if already tracking
     if wallet in config["wallets"]:
-        await update.message.reply_text(f"⚠️ Already tracking: `{wallet}`\n✅ Monitoring is active!", parse_mode='Markdown')
+        # Update name if provided
+        if wallet_name:
+            config["wallet_names"][wallet] = wallet_name
+            save_config(config)
+            await update.message.reply_text(f"✅ Updated name to: *{wallet_name}*\n✅ Monitoring is active!", parse_mode='Markdown')
+        else:
+            await update.message.reply_text(f"⚠️ Already tracking: `{wallet}`\n✅ Monitoring is active!", parse_mode='Markdown')
         return
     
     # Add to config
     config["wallets"].append(wallet)
+    if wallet_name:
+        if "wallet_names" not in config:
+            config["wallet_names"] = {}
+        config["wallet_names"][wallet] = wallet_name
     save_config(config)
     
     # Start monitoring this wallet
@@ -145,7 +168,8 @@ async def add_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     monitors[wallet] = monitor
     
     print(f"✅ Started monitoring {wallet[:10]}...")
-    await update.message.reply_text(f"✅ Now tracking: `{wallet}`\n⚡ You'll receive instant alerts with clickable market links!", parse_mode='Markdown')
+    name_display = f" as *{wallet_name}*" if wallet_name else ""
+    await update.message.reply_text(f"✅ Now tracking: `{wallet}`{name_display}\n⚡ You'll receive instant alerts with clickable market links!", parse_mode='Markdown')
 
 async def remove_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Remove a wallet from tracking"""
@@ -167,6 +191,9 @@ async def remove_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Remove from config
     config["wallets"].remove(wallet)
+    # Remove wallet name if exists
+    if wallet in config.get("wallet_names", {}):
+        del config["wallet_names"][wallet]
     save_config(config)
     
     # Stop monitoring
@@ -181,13 +208,16 @@ async def list_wallets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     config = load_config()
     
     if not config["wallets"]:
-        await update.message.reply_text("📭 No wallets being tracked\n\nUse /add <wallet> to start tracking")
+        await update.message.reply_text("🔭 No wallets being tracked\n\nUse /add <wallet> [name] to start tracking")
         return
     
     message = "📋 *Tracked Wallets:*\n\n"
     for i, wallet in enumerate(config["wallets"], 1):
-        # All wallets in config are considered active since they auto-restart
-        message += f"{i}. `{wallet[:10]}...{wallet[-8:]}` 🟢\n"
+        wallet_name = config.get("wallet_names", {}).get(wallet, None)
+        if wallet_name:
+            message += f"{i}. *{wallet_name}* 🟢\n   `{wallet[:10]}...{wallet[-8:]}`\n"
+        else:
+            message += f"{i}. `{wallet[:10]}...{wallet[-8:]}` 🟢\n"
     
     message += f"\n✅ All {len(config['wallets'])} wallet(s) are being monitored!"
     
@@ -227,6 +257,19 @@ async def process_message_queue(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"❌ Error sending message: {e}")
 
+async def setup_bot_commands(app: Application):
+    """Set up bot commands for the menu"""
+    commands = [
+        BotCommand("start", "Show welcome message and commands"),
+        BotCommand("add", "Add a wallet to track (with optional name)"),
+        BotCommand("remove", "Remove a wallet from tracking"),
+        BotCommand("list", "Show all tracked wallets"),
+        BotCommand("status", "Show monitoring status"),
+        BotCommand("help", "Show help message"),
+    ]
+    await app.bot.set_my_commands(commands)
+    print("✅ Bot commands menu configured")
+
 def main():
     """Start the bot"""
     print("=" * 60)
@@ -247,13 +290,16 @@ def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
     # Add command handlers
-    print("📝 Adding command handlers...")
+    print("🔧 Adding command handlers...")
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("add", add_wallet))
     app.add_handler(CommandHandler("remove", remove_wallet))
     app.add_handler(CommandHandler("list", list_wallets))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("help", help_command))
+    
+    # Set up bot commands menu
+    app.post_init = setup_bot_commands
     
     # Load existing wallets and start monitoring
     config = load_config()
@@ -291,5 +337,4 @@ def main():
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-
     main()

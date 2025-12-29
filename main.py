@@ -107,7 +107,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
     await update.message.reply_text(welcome_message, parse_mode='Markdown')
 
-"""Add a wallet to track"""
+async def add_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Add a wallet to track"""
     print(f"📨 Received /add from user {update.effective_user.id}")
     
     if not context.args:

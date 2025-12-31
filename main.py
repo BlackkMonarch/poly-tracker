@@ -10,6 +10,12 @@ from polymarket_tracker import PolymarketMonitor
 # YOUR TELEGRAM BOT TOKEN
 TELEGRAM_BOT_TOKEN = "8268755391:AAETur8_5id_EX8XMqdv9UnxC7tQutRMKqg"
 
+# Railway provides this automatically
+PORT = int(os.environ.get("PORT", 8080))
+# Your Railway app URL (replace with your actual Railway URL)
+RAILWAY_URL = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "your-app.railway.app")
+WEBHOOK_URL = f"https://{RAILWAY_URL}/{TELEGRAM_BOT_TOKEN}"
+
 # Use Railway's persistent storage path
 CONFIG_DIR = "/data"
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
@@ -292,6 +298,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 👥 Tracked wallets: {total}
 🟢 Active monitors: {active}
 💾 Storage: {storage_status}
+🌐 Mode: Webhook
 
 💡 Wallets persist across bot restarts!
 """
@@ -308,7 +315,6 @@ async def process_message_queue(context: ContextTypes.DEFAULT_TYPE):
         try:
             chat_id, message = message_queue.get_nowait()
             
-            # Retry logic for queued messages
             for attempt in range(3):
                 try:
                     await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
@@ -336,34 +342,37 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             print(f"❌ Could not send error message to user: {e}")
 
-async def setup_bot_commands(app: Application):
-    """Set up bot commands for the menu"""
-    commands = [
-        BotCommand("start", "Show welcome message and commands"),
-        BotCommand("add", "Add a wallet to track (with optional name)"),
-        BotCommand("remove", "Remove a wallet from tracking"),
-        BotCommand("list", "Show all tracked wallets"),
-        BotCommand("status", "Show monitoring status"),
-        BotCommand("help", "Show help message"),
-    ]
-    await app.bot.set_my_commands(commands)
-    print("✅ Bot commands menu configured")
+async def post_init(app: Application):
+    """Initialize bot after startup"""
+    try:
+        # Set bot commands menu
+        commands = [
+            BotCommand("start", "Show welcome message and commands"),
+            BotCommand("add", "Add a wallet to track (with optional name)"),
+            BotCommand("remove", "Remove a wallet from tracking"),
+            BotCommand("list", "Show all tracked wallets"),
+            BotCommand("status", "Show monitoring status"),
+            BotCommand("help", "Show help message"),
+        ]
+        await app.bot.set_my_commands(commands)
+        print("✅ Bot commands menu configured")
+    except Exception as e:
+        print(f"⚠️ Could not set bot commands (non-critical): {e}")
 
 def main():
     """Start the bot"""
     print("=" * 60)
-    print("POLYMARKET TELEGRAM BOT - RAILWAY EDITION")
+    print("POLYMARKET TELEGRAM BOT - WEBHOOK MODE")
     print("=" * 60)
     
     print(f"📂 Config path: {CONFIG_FILE}")
     print(f"📦 Persistent storage mounted: {os.path.exists('/data')}")
     print(f"📄 Config exists: {os.path.exists(CONFIG_FILE)}")
+    print(f"🌐 Webhook URL: {WEBHOOK_URL}")
+    print(f"🔌 Port: {PORT}")
     
     if TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
         print("❌ Error: Please set your Telegram Bot Token!")
-        print("1. Talk to @BotFather on Telegram")
-        print("2. Create a new bot and get the token")
-        print("3. Set it in the code or environment variable")
         return
     
     print(f"🔑 Bot token: {TELEGRAM_BOT_TOKEN[:10]}...{TELEGRAM_BOT_TOKEN[-5:]}")
@@ -398,8 +407,8 @@ def main():
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("help", help_command))
     
-    # Set up bot commands menu
-    app.post_init = setup_bot_commands
+    # Set up post-init for bot commands
+    app.post_init = post_init
     
     # Load existing wallets and start monitoring
     config = load_config()
@@ -429,12 +438,18 @@ def main():
     app.job_queue.run_repeating(process_message_queue, interval=0.5, first=0)
     print("✅ Message queue processor started")
     
-    print("✅ Bot started! Waiting for messages...")
-    print("💡 Send /start to the bot on Telegram to begin")
+    print("✅ Bot started in WEBHOOK mode")
+    print("💡 Telegram will send updates to your Railway URL")
     print("=" * 60)
     
-    # Start the bot
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Start webhook server
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TELEGRAM_BOT_TOKEN,
+        webhook_url=WEBHOOK_URL,
+        allowed_updates=Update.ALL_TYPES
+    )
 
 if __name__ == "__main__":
     main()

@@ -4,13 +4,14 @@ import asyncio
 import queue
 from telegram import Update, BotCommand
 from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.request import HTTPXRequest
 from polymarket_tracker import PolymarketMonitor
 
 # YOUR TELEGRAM BOT TOKEN
 TELEGRAM_BOT_TOKEN = "8268755391:AAETur8_5id_EX8XMqdv9UnxC7tQutRMKqg"
 
 # Use Railway's persistent storage path
-CONFIG_DIR = "/data"  # Your volume mount path
+CONFIG_DIR = "/data"
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 # Global monitors dictionary {wallet: monitor_instance}
@@ -19,6 +20,19 @@ monitors = {}
 # Queue for messages from WebSocket threads
 message_queue = queue.Queue()
 
+async def safe_reply(message, text, max_retries=3, **kwargs):
+    """Send reply with retry logic"""
+    for attempt in range(max_retries):
+        try:
+            return await message.reply_text(text, **kwargs)
+        except Exception as e:
+            if attempt == max_retries - 1:
+                print(f"❌ Failed to send message after {max_retries} attempts: {e}")
+                raise
+            wait_time = (attempt + 1) * 2
+            print(f"⚠️ Message send failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s...")
+            await asyncio.sleep(wait_time)
+
 def ensure_config_dir():
     """Ensure the config directory exists"""
     try:
@@ -26,7 +40,6 @@ def ensure_config_dir():
         print(f"✅ Config directory ensured: {CONFIG_DIR}")
     except Exception as e:
         print(f"⚠️  Could not create config dir: {e}")
-        # Fallback to current directory
         global CONFIG_FILE
         CONFIG_FILE = "config.json"
         print(f"⚠️  Falling back to: {CONFIG_FILE}")
@@ -35,7 +48,6 @@ def load_config():
     """Load tracked wallets from config file"""
     ensure_config_dir()
     
-    # Check if we have old config in current directory but not in /data
     local_config = "config.json"
     if os.path.exists(local_config) and not os.path.exists(CONFIG_FILE):
         print("📦 Migrating config from local to persistent storage...")
@@ -52,7 +64,6 @@ def load_config():
                 config = json.load(f)
                 print(f"📁 Config loaded from {CONFIG_FILE}")
                 
-                # Ensure all fields exist
                 if "wallets" not in config:
                     config["wallets"] = []
                 if "chat_ids" not in config:
@@ -80,7 +91,6 @@ def save_config(config):
     except Exception as e:
         print(f"❌ Error saving config: {e}")
         
-        # Try to save locally as backup
         try:
             local_file = "config.json"
             with open(local_file, 'w') as f:
@@ -106,18 +116,15 @@ def format_trade_message(trade):
     tx_hash = trade.get("transactionHash", "Unknown")
     wallet = trade.get("proxyWallet", "Unknown")
     
-    # Get wallet name if set
     config = load_config()
     wallet_name = config.get("wallet_names", {}).get(wallet.lower(), None)
     wallet_display = f"*{wallet_name}*" if wallet_name else f"`{wallet[:10]}...{wallet[-8:]}`"
     
-    # Get eventSlug for correct URL (not market slug!)
     event_slug = trade.get("eventSlug", "")
     if event_slug:
         market_url = f"https://polymarket.com/event/{event_slug}"
         market_link = f"[{market[:80]}]({market_url})"
     else:
-        # Fallback: search URL
         import urllib.parse
         search_query = urllib.parse.quote(market[:50])
         market_url = f"https://polymarket.com/search?q={search_query}"
@@ -142,7 +149,6 @@ def format_trade_message(trade):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command - show welcome message"""
-    # Show storage info
     config_info = f"\n💾 *Storage:* Using persistent storage at `/data`"
     
     welcome_message = f"""
@@ -160,29 +166,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 `/add 0xaED1f1F120C1aB95958719BEb984D5b2013cF0cD`
 {config_info}
 """
-    await update.message.reply_text(welcome_message, parse_mode='Markdown')
+    await safe_reply(update.message, welcome_message, parse_mode='Markdown')
 
 async def add_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Add a wallet to track"""
     print(f"📨 Received /add from user {update.effective_user.id}")
     
     if not context.args:
-        await update.message.reply_text("❌ Please provide a wallet address\nExample: /add 0x... [optional name]")
+        await safe_reply(update.message, "❌ Please provide a wallet address\nExample: /add 0x... [optional name]")
         return
     
     wallet = context.args[0].strip().lower()
     if not wallet.startswith("0x"):
         wallet = "0x" + wallet
     
-    # Get optional name (all args after wallet address)
     wallet_name = None
     if len(context.args) > 1:
         wallet_name = " ".join(context.args[1:]).strip()
     
-    # Load config
     config = load_config()
     
-    # Save chat ID for future alerts
     chat_id = update.effective_chat.id
     if chat_id not in config.get("chat_ids", []):
         if "chat_ids" not in config:
@@ -190,37 +193,31 @@ async def add_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         config["chat_ids"].append(chat_id)
         print(f"✅ Added chat ID {chat_id} to config")
     
-    # Check if already tracking
     if wallet in config["wallets"]:
-        # Update name if provided
         if wallet_name:
             config["wallet_names"][wallet] = wallet_name
             save_config(config)
-            await update.message.reply_text(f"✅ Updated name to: *{wallet_name}*\n✅ Monitoring is active!", parse_mode='Markdown')
+            await safe_reply(update.message, f"✅ Updated name to: *{wallet_name}*\n✅ Monitoring is active!", parse_mode='Markdown')
         else:
-            await update.message.reply_text(f"⚠️ Already tracking: `{wallet}`\n✅ Monitoring is active!", parse_mode='Markdown')
+            await safe_reply(update.message, f"⚠️ Already tracking: `{wallet}`\n✅ Monitoring is active!", parse_mode='Markdown')
         return
     
-    # Add to config
     config["wallets"].append(wallet)
     if wallet_name:
         if "wallet_names" not in config:
             config["wallet_names"] = {}
         config["wallet_names"][wallet] = wallet_name
     
-    # Save config to persistent storage
     if save_config(config):
-        await update.message.reply_text(f"💾 Config saved to persistent storage")
+        await safe_reply(update.message, f"💾 Config saved to persistent storage")
     else:
-        await update.message.reply_text(f"⚠️ Config saved locally (persistent storage failed)")
+        await safe_reply(update.message, f"⚠️ Config saved locally (persistent storage failed)")
     
-    # Start monitoring this wallet
     def on_trade(trade):
         """Callback when trade is detected"""
         message = format_trade_message(trade)
         print(f"🔥 Trade detected for {wallet[:10]}..., queuing message for chat {chat_id}")
         
-        # Queue message for all registered chats
         for cid in config.get("chat_ids", [chat_id]):
             message_queue.put((cid, message))
     
@@ -230,48 +227,42 @@ async def add_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     print(f"✅ Started monitoring {wallet[:10]}...")
     name_display = f" as *{wallet_name}*" if wallet_name else ""
-    await update.message.reply_text(f"✅ Now tracking: `{wallet}`{name_display}\n⚡ You'll receive instant alerts with clickable market links!", parse_mode='Markdown')
+    await safe_reply(update.message, f"✅ Now tracking: `{wallet}`{name_display}\n⚡ You'll receive instant alerts with clickable market links!", parse_mode='Markdown')
 
 async def remove_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Remove a wallet from tracking"""
     if not context.args:
-        await update.message.reply_text("❌ Please provide a wallet address\nExample: /remove 0x...")
+        await safe_reply(update.message, "❌ Please provide a wallet address\nExample: /remove 0x...")
         return
     
     wallet = context.args[0].strip().lower()
     if not wallet.startswith("0x"):
         wallet = "0x" + wallet
     
-    # Load config
     config = load_config()
     
-    # Check if tracking
     if wallet not in config["wallets"]:
-        await update.message.reply_text(f"⚠️ Not tracking: `{wallet}`", parse_mode='Markdown')
+        await safe_reply(update.message, f"⚠️ Not tracking: `{wallet}`", parse_mode='Markdown')
         return
     
-    # Remove from config
     config["wallets"].remove(wallet)
-    # Remove wallet name if exists
     if wallet in config.get("wallet_names", {}):
         del config["wallet_names"][wallet]
     
-    # Save updated config
     save_config(config)
     
-    # Stop monitoring
     if wallet in monitors:
         monitors[wallet].stop()
         del monitors[wallet]
     
-    await update.message.reply_text(f"✅ Stopped tracking: `{wallet}`", parse_mode='Markdown')
+    await safe_reply(update.message, f"✅ Stopped tracking: `{wallet}`", parse_mode='Markdown')
 
 async def list_wallets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List all tracked wallets"""
     config = load_config()
     
     if not config["wallets"]:
-        await update.message.reply_text("🔭 No wallets being tracked\n\nUse /add [name] <wallet> to start tracking")
+        await safe_reply(update.message, "🔭 No wallets being tracked\n\nUse /add [name] <wallet> to start tracking")
         return
     
     message = "📋 *Tracked Wallets:*\n\n"
@@ -284,7 +275,7 @@ async def list_wallets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     message += f"✅ All {len(config['wallets'])} wallet(s) are being monitored!"
     
-    await update.message.reply_text(message, parse_mode='Markdown')
+    await safe_reply(update.message, message, parse_mode='Markdown')
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show monitoring status"""
@@ -293,7 +284,6 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total = len(config["wallets"])
     active = len(monitors)
     
-    # Check storage info
     storage_status = "✅ Using persistent storage" if os.path.exists("/data") else "⚠️ Using local storage"
     
     message = f"""
@@ -306,23 +296,45 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💡 Wallets persist across bot restarts!
 """
     
-    await update.message.reply_text(message, parse_mode='Markdown')
+    await safe_reply(update.message, message, parse_mode='Markdown')
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show help message"""
     await start(update, context)
 
 async def process_message_queue(context: ContextTypes.DEFAULT_TYPE):
-    """Process queued messages from WebSocket threads - called every 0.5s"""
-    # Process all queued messages in this run
+    """Process queued messages from WebSocket threads"""
     while not message_queue.empty():
         try:
             chat_id, message = message_queue.get_nowait()
-            await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
+            
+            # Retry logic for queued messages
+            for attempt in range(3):
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text=message, parse_mode='Markdown')
+                    break
+                except Exception as e:
+                    if attempt == 2:
+                        print(f"❌ Failed to send queued message after 3 attempts: {e}")
+                    else:
+                        await asyncio.sleep((attempt + 1) * 2)
+                        
         except queue.Empty:
             break
         except Exception as e:
-            print(f"❌ Error sending message: {e}")
+            print(f"❌ Error processing message queue: {e}")
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    """Handle errors"""
+    print(f"❌ Error occurred: {context.error}")
+    
+    if update and hasattr(update, 'effective_message') and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "⚠️ An error occurred. Please try again in a moment."
+            )
+        except Exception as e:
+            print(f"❌ Could not send error message to user: {e}")
 
 async def setup_bot_commands(app: Application):
     """Set up bot commands for the menu"""
@@ -343,7 +355,6 @@ def main():
     print("POLYMARKET TELEGRAM BOT - RAILWAY EDITION")
     print("=" * 60)
     
-    # Check storage
     print(f"📂 Config path: {CONFIG_FILE}")
     print(f"📦 Persistent storage mounted: {os.path.exists('/data')}")
     print(f"📄 Config exists: {os.path.exists(CONFIG_FILE)}")
@@ -357,9 +368,26 @@ def main():
     
     print(f"🔑 Bot token: {TELEGRAM_BOT_TOKEN[:10]}...{TELEGRAM_BOT_TOKEN[-5:]}")
     
-    # Create application
+    # Create custom request with longer timeouts
+    print("🔧 Creating custom HTTP request handler...")
+    request = HTTPXRequest(
+        connection_pool_size=8,
+        connect_timeout=30.0,
+        read_timeout=30.0,
+        write_timeout=30.0,
+        pool_timeout=30.0
+    )
+    
+    # Create application with custom request
     print("🔧 Creating application...")
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app = Application.builder()\
+        .token(TELEGRAM_BOT_TOKEN)\
+        .request(request)\
+        .build()
+    
+    # Add error handler
+    app.add_error_handler(error_handler)
+    print("✅ Error handler registered")
     
     # Add command handlers
     print("🔧 Adding command handlers...")
@@ -378,7 +406,6 @@ def main():
     print(f"📋 Loaded {len(config['wallets'])} wallets from config")
     print(f"📋 Loaded {len(config.get('chat_ids', []))} chat IDs")
     
-    # Auto-restart monitoring for all saved wallets
     if config["wallets"] and config.get("chat_ids"):
         print("🔄 Restarting monitors for saved wallets...")
         
@@ -387,7 +414,6 @@ def main():
                 def on_trade(trade):
                     message = format_trade_message(trade)
                     print(f"🔥 Trade detected for {w[:10]}..., queuing for {len(config['chat_ids'])} chats")
-                    # Send to all registered chats
                     for chat_id in config.get("chat_ids", []):
                         message_queue.put((chat_id, message))
                 return on_trade
@@ -399,7 +425,7 @@ def main():
     else:
         print("ℹ️  No wallets or chat IDs to restore")
     
-    # Start message queue processor as a background job
+    # Start message queue processor
     app.job_queue.run_repeating(process_message_queue, interval=0.5, first=0)
     print("✅ Message queue processor started")
     

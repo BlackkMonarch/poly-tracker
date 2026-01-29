@@ -8,7 +8,7 @@ from telegram.request import HTTPXRequest
 from polymarket_tracker import PolymarketMonitor
 
 # YOUR TELEGRAM BOT TOKEN
-TELEGRAM_BOT_TOKEN = "8268755391:AAETur8_5id_EX8XMqdv9UnxC7tQutRMKqg"
+TELEGRAM_BOT_TOKEN = #You're meant to put your bot token here 
 
 # Railway provides this automatically
 PORT = int(os.environ.get("PORT", 8080))
@@ -452,3 +452,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
